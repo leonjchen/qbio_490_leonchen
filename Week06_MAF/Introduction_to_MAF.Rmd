@@ -1,0 +1,242 @@
+---
+title: "Introduction to MAF"
+author: Erika Li, Jeanne Revilla, Mahija Mogalipuvvu, adapted from Nicole Black, Wade Boohar
+date: 07/17/22
+updated: 9/29/2025
+---
+
+***Deliverables***
+- upload this R Notebook to your GitHub and submit the link to your Repo on Brightspace
+- include ALL graphs or figures created in this assignment in a folder with your R notebook with descriptive file names.
+
+We encourage you to work with a partner. Therefore, it is okay if your answers are the same as your partner’s as long as everyone understands it and could explain it in their own words if asked. Each person must individually push their code to Github. *At the top of your R Notebook, write the name of you and your partner(s) as a comment.*
+
+***Complete the following coding activity and answer any following questions as comments in your R Notebook***
+
+In this assignment, you will need to use your skills learned in class to demonstrate your understanding of categorical variables and R data structures.
+
+*Pre-Assignment*
+Load all necessary packages, read in the clinical data.csv file you have in your analysis_data folder, and instantiate the MAF_object.
+```{r}
+knitr::opts_knit$set(root.dir = normalizePath("/home1/leonjche/490_cluster/analysis_data")) 
+
+library(BiocManager)
+library(TCGAbiolinks)
+library(maftools)
+
+clin_query <- GDCquery(project = "TCGA-BRCA", data.category = "Clinical", data.type = "Clinical Supplement", data.format = 'BCR Biotab')
+
+#GDCdownload(clin_query) #Run only once
+clinical.BCRtab.all <- GDCprepare(clin_query)
+clinic <- clinical.BCRtab.all$clinical_patient_brca[-c(1,2),]
+colnames(clinic)[colnames(clinic) == "bcr_patient_barcode"] <- "Tumor_Sample_Barcode"
+
+#Mutation Data
+colnames(clinic)[ colnames(clinic) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+maf_query <- GDCquery(
+  project = "TCGA-BRCA",
+  data.category = "Simple Nucleotide Variation",
+  access = "open",
+  data.type = "Masked Somatic Mutation",
+  workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+GDCdownload(maf_query, method = "api", files.per.chunk = 100)
+maf <- GDCprepare(maf_query)
+
+maf_object <- read.maf(maf = maf,
+                       clinicalData = clinic,
+                       isTCGA = TRUE)
+```
+
+It's useful to save your MAF_object, so that you don't have to go through the trouble of querying and preparing it everytime. The saveRDS function allows us to save an R object, allowing us to access it directly from our files. 
+```{r}
+saveRDS(maf_object, file = "/home1/leonjche/490_cluster/analysis_data/maf_object.rds")
+
+# ex. saveRDS(MAF_object, file = "/home1/erika/490_cluster/analysis_data/maf_object.rds")
+```
+
+When you reopen a new R session and want to access your MAF_object, you can use the readRDS function to load the object back into a new variable.
+```{r}
+maf_object <- readRDS(file = "/home1/leonjche/490_cluster/analysis_data/maf_object.rds")
+
+# ex. MAF_object <- readRDS(file = "/home1/erika/490_cluster/analysis_data/maf_object.rds")
+```
+
+*1*
+Choose a clinical variable (or any variable from clin_rad or clin_drug) to separate your populations into two different groups and rewrite the column or create a new column with that variable as a factor. ***Do not use age or vital_status as your clinical variable.*** Hint: if your variable is continuous, you will need to determine your own cutoffs for the different levels of the factor. If your variable is categorical and has more than two possible values, choose the two that are the most common.
+```{r}
+colnames(maf_object@clinical.data)
+unique(maf_object@clinical.data$er_status_by_ihc)
+
+#er ihc positive subsetting
+er_ihc_mask <- ifelse(maf_object@clinical.data$er_status_by_ihc == "Positive",TRUE, FALSE)
+
+er_ihc_positive_barcodes <- maf_object@clinical.data$Tumor_Sample_Barcode[er_ihc_mask]
+
+er_ihc_positive_maf <- subsetMaf(maf=maf_object,tsb = er_ihc_positive_barcodes)
+
+#er ihc negative subsetting
+er_ihc_mask_neg <- ifelse(maf_object@clinical.data$er_status_by_ihc == "Negative",TRUE, FALSE)
+
+er_ihc_negative_barcodes <- maf_object@clinical.data$Tumor_Sample_Barcode[er_ihc_mask_neg]
+
+er_ihc_negative_maf <- subsetMaf(maf=maf_object,tsb = er_ihc_negative_barcodes)
+```
+
+
+*2*
+Create a co-oncoplot with the top 10-20 (you choose) most mutated genes for the two groups. Pick one that has a large discrepancy in % mutated or type of mutations between the groups and research it. 
+Research it. What is the gene used for? Can you think of any reason for the discrepancy?
+```{r}
+png("/home1/leonjche/490_cluster/Week06_MAF/ER_IHC_PosNeg_coOncoplot.png",
+    width = 10, height = 6, units = "in", res = 300)
+coOncoplot(
+  m1 = er_ihc_positive_maf,
+  m2 = er_ihc_negative_maf,
+  m1Name = "ER Positive",
+  m2Name = "ER Negative",
+  genes = getGeneSummary(maf_object)$Hugo_Symbol[1:10],
+  gene_mar = 5
+)
+dev.off()
+
+#the most mutated gene is the PIK3CA gene, which provides instructions for the p110α protein reponsible for regulating cell growth and division
+
+#there are a lot more missense mutations in the ER-positive group in PIK3CA than ER-negative group, suggestive that PIK3CA mutations may be more responsible for ER-positive cancer, since they are receptive to estrogen which commonly is a signaling hormone connected to cell growth and division. The lower amount of PIK3CA mutations in ER-negative cancer highlights the ER-negative cancer's lack of dependency on common growth hormones, thus why it is also less responsive to hormonal treatments
+```
+
+
+*3*
+Create a contingency table with your variable and chosen gene. Run a Fisher’s Exact Test between presence of mutations for that gene and your clinical variable. Create and save a mosaic plot. 
+Interpret the output of the Fisher’s Exact Test in terms of the odds ratio and p-value.
+```{r}
+# Contingency table of ER status vs PIK3CA mutation
+#Find PIK3CA data first
+pik3ca_samples <- unique(maf_object@data$Tumor_Sample_Barcode[
+  maf_object@data$Hugo_Symbol == "PIK3CA"
+])
+
+#add a new column for PIK3CA information
+maf_object@clinical.data$PIK3CA_status <- ifelse(
+  maf_object@clinical.data$Tumor_Sample_Barcode %in% pik3ca_samples,
+  "Mutated", "WT"
+)
+
+#filter data for Not Available and Indeterminate ER Status
+filtered_ER_data <- maf_object@clinical.data[
+  maf_object@clinical.data$er_status_by_ihc %in% c("Positive", "Negative"),
+]
+
+#create table
+table_ER_PIK3CA <- table(
+  filtered_ER_data$er_status_by_ihc,
+  filtered_ER_data$PIK3CA_status
+)
+table_ER_PIK3CA
+
+#fischer's
+fisher_result <- fisher.test(table_ER_PIK3CA)
+fisher_result
+
+#p-value of 3.469e-11, there is a significant relationship between the occurence of mutations in PIK3CA and ER status of the BRCA
+
+#odds of 0.2857069 < 1 = PIK3CA mutations are less common in the ER-negative group
+
+#mosaic plot
+png("/home1/leonjche/490_cluster/Week06_MAF/ER_PIK3CA_mosaic.png",
+    width = 1000, height = 800, res = 150)
+
+mosaicplot(
+  table_ER_PIK3CA,
+  main = "ER Status vs PIK3CA Mutation",
+  xlab = "ER IHC Status",
+  ylab = "PIK3CA Mutation Status",
+  color = c("#999999", "#E69F00"),  # WT gray, Mutated orange
+  border = "white"
+)
+
+dev.off()
+```
+
+
+*4*
+Subset your maf_object based on your chosen clinical variable and create a co-lollipop plot of your chosen gene divided between the two different clinical variable possibilities. Include descriptive names on your plot.
+Do you notice any difference in terms of mutations (e.g. sites, types, number) between the two populations?
+```{r}
+png("/home1/leonjche/490_cluster/Week06_MAF/ER_IHC_PosNeg_lollipopCoPlot.png",
+    width = 10, height = 6, units = "in", res = 300)
+lollipopPlot2(m1 = er_ihc_positive_maf,
+  m2 = er_ihc_negative_maf,
+  m1_name = "ER Positive",
+  m2_name = "ER Negative",
+  gene = "PIK3CA")
+dev.off()
+
+#mutations actually appear to be pretty even among the two groups in terms of positioning and frequency
+```
+
+
+*5*
+Create your Overall_Survival_Status column and create a mafSurvival KM plot based on mutations in your chosen gene.
+Does there seem to be a difference? Hypothesize why or not based on the other analysis you did with the gene above.
+```{r}
+library(survival)
+library(survminer)
+
+# Build mutation status directly from the MAF data
+pik3ca_samples <- unique(maf_object@data$Tumor_Sample_Barcode[
+  maf_object@data$Hugo_Symbol == "PIK3CA"
+])
+
+clin <- maf_object@clinical.data
+
+# Create a categorical column "PIK3CA_group"
+clin$PIK3CA_group <- ifelse(clin$Tumor_Sample_Barcode %in% pik3ca_samples,
+                            "PIK3CA Mutated", "PIK3CA WT")
+
+## 2) Clean & prep survival inputs (follow the slides)
+to_num <- function(x) suppressWarnings(as.numeric(x))
+                
+# survival_time: prefer death_days_to, else last_contact_days_to
+clin$survival_time <- ifelse(
+  !is.na(to_num(clin$death_days_to)),
+  to_num(clin$death_days_to),
+  to_num(clin$last_contact_days_to)
+)
+
+clin$death_event <- ifelse(clin$vital_status == "Dead", TRUE,
+                     ifelse(clin$vital_status == "Alive", FALSE, NA))
+
+clean_df <- subset(clin,
+                   !is.na(PIK3CA_group) &
+                   !is.na(survival_time) &
+                   !is.na(death_event))
+
+survival_object <- Surv(time = clean_df$survival_time,
+                        event = clean_df$death_event)
+
+fit_object <- survfit(survival_object ~ PIK3CA_group, data = clean_df)
+
+km <- ggsurvplot(
+  fit_object,
+  data       = clean_df,
+  pval       = TRUE,          # log-rank p-value on plot
+  conf.int   = FALSE,
+  risk.table = TRUE,          # add risk table like in class examples
+  legend     = "right",
+  legend.title = "Group",
+  legend.labs  = levels(clean_df$PIK3CA_group),
+  xlab = "Days",
+  ylab = "Overall survival probability",
+  ggtheme = theme_minimal(),
+  title = "Overall Survival by PIK3CA Mutation Status (TCGA-BRCA)"
+)
+
+out_plot <- "/home1/leonjche/490_cluster/Week06_MAF/PIK3CA_survival_plot.png"
+out_risk <- "/home1/leonjche/490_cluster/Week06_MAF/PIK3CA_survival_plot_risk_table.png"
+
+ggsave(out_plot, km$plot, width = 10, height = 8, dpi = 150)
+ggsave(out_risk, km$table + theme_minimal(), width = 10, height = 3, dpi = 150)
+
+km
+```
